@@ -20,7 +20,7 @@ except ImportError:
   HAS_TRT = False
 
 logger = logging.getLogger(__name__)
-
+TRT_LOGGER = trt.Logger(trt.Logger.WARNING) if HAS_TRT else None
 
 # ================= 1. 将 TensorRT 显存分配权移交给 PyTorch =================
 
@@ -70,7 +70,7 @@ class AutoEngineRunner:
       raise RuntimeError("TensorRT library not found!")
 
     if self.runtime is None:
-      self.runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+      self.runtime = trt.Runtime(TRT_LOGGER)
       if hasattr(trt, "IGpuAllocator"):
         self.gpu_allocator = PyTorchGpuAllocator()
         self.runtime.gpu_allocator = self.gpu_allocator
@@ -542,12 +542,13 @@ class MiniMaxH3TRTVAE(nn.Module):
     if self.encoder_runner is None:
       raise RuntimeError("Encoder engine is not configured in VAE Loader node!")
     if x.ndim == 4:
-      x = x.unsqueeze(2)
+      x = x.unsqueeze(2)  # 扩展为 5D 张量 [B, C, 1, H, W]
+    # 🌟 修复关键：当输入是单张图片 (T=1) 时，在时间维度复制填满 17 帧以满足静态 TRT 引擎
     if x.shape[2] == 1:
-      moments = self.tiled_encode(self._normalize_pixels(x))[:, :, -1:, :, :]
+      x_static = x.repeat(1, 1, self.clip_length, 1, 1)
+      moments = self.tiled_encode(self._normalize_pixels(x_static))[:, :, -1:, :, :]
     else:
       moments = self.encode_temporal(x)
-
     mean = torch.chunk(moments, 2, dim=1)[0]
     return (mean - self.latents_mean.to(mean)) / self.latents_std.to(mean)
 
