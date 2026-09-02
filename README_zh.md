@@ -20,12 +20,15 @@ python -m pip install -r ComfyUI-H3VAE_TRT/requirements.txt
 
 ### 下载模型
 
-1. 下载全部 3 个模型 -> [点击这里](https://huggingface.co/lihaoyun6/MiniMax-H3-VAE-ONNX)
-2. 将它们放入 `ComfyUI/models/vae` 目录
+1. 从 [这里](https://huggingface.co/lihaoyun6/MiniMax-H3-VAE-ONNX) 下载 decoder & encoder 的 .onnx 模型, 以及对应的 .data 文件(如果有的话)
+
+	> 如果显存不足 12GB 的话可以使用 `w4a16_awq` 量化版 decoder.  
+	
+2. 将模型放入 `ComfyUI/models/vae` 目录
 
 ### 节点
 
-- 在首次使用前请先通过 `MiniMax-H3 TRT Compiler` 节点将 ONNX 模型编译为 TensorRT 引擎。
+- 首次使用前请先通过 `MiniMax-H3 TRT Compiler` 节点将 ONNX 模型编译为 TensorRT 引擎。
 - 成功编译 TRT Engine 后，就可以使用 `MiniMax-H3 TRT VAE Loader` 节点加载它们了。
 
 ## 致谢

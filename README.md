@@ -16,12 +16,15 @@ python -m pip install -r ComfyUI-H3VAE_TRT/requirements.txt
 
 ## Usage 
 ### Download Models  
-1. Download all 3 models -> [here](https://huggingface.co/lihaoyun6/MiniMax-H3-VAE-ONNX)  
-2. Put them into `ComfyUI/models/vae`
+1. Download encoder & decoder `.onnx` files (and `.data` files, if present) -> [here](https://huggingface.co/lihaoyun6/MiniMax-H3-VAE-ONNX)  
+
+	> You can use the `w4a16_awq` decoder if you don't have 12GB+ of VRAM.
+	
+2. Put models into `ComfyUI/models/vae`
 
 ### Nodes
-- Please compile the TensorRT engine from onnx using the `MiniMax-H3 TRT VAE Compiler` node before first use..
-- After successfully compiling the TRT Engines, you can use the `MiniMax-H3 TRT VAE Loader` node to load them.
+- Compile the TensorRT engine from onnx using the `MiniMax-H3 TRT VAE Compiler` node before first use.  
+- After compiling the TRT Engines, you can use the `MiniMax-H3 TRT VAE Loader` node to load them.  
 
 ## Credits
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) @comfyanonymous

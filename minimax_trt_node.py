@@ -89,7 +89,9 @@ class AutoEngineRunner:
 
     self.context = self.engine.create_execution_context()
     if self.context is None:
-      raise RuntimeError("Failed to create TensorRT execution context (Out of VRAM)!")
+      raise RuntimeError(
+          "Failed to create TensorRT execution context (Out of VRAM)!"
+      )
 
   def offload_to_ram(self):
     if self.context is not None:
@@ -100,7 +102,9 @@ class AutoEngineRunner:
         self.gpu_allocator.allocated_tensors.clear()
       torch.cuda.empty_cache()
 
-  def infer(self, input_tensor: torch.Tensor, output_shape: tuple, input_name: str) -> torch.Tensor:
+  def infer(
+      self, input_tensor: torch.Tensor, output_shape: tuple, input_name: str
+  ) -> torch.Tensor:
     self.load_to_gpu()
 
     device = input_tensor.device
@@ -183,11 +187,18 @@ LATENTS_STD = [
 
 class MiniMaxH3TRTVAE(nn.Module):
 
-  def __init__(self, decoder_runner: AutoEngineRunner = None, encoder_runner: AutoEngineRunner = None,):
+  def __init__(
+      self,
+      decoder_runner: AutoEngineRunner = None,
+      encoder_runner: AutoEngineRunner = None,
+  ):
     super().__init__()
     self.vae_dtype = torch.float16
     self.decoder_runner = decoder_runner
     self.encoder_runner = encoder_runner
+
+    # 显存追踪账本属性 (由 TRTModelPatcher 和 ComfyUI 读取)
+    self.model_loaded_weight_memory = 0
 
     self.vae_ratio = 16
     self.vae_ratio_t = 4
@@ -196,84 +207,52 @@ class MiniMaxH3TRTVAE(nn.Module):
     self.frame_pre_padding = (-self.clip_length) % self.vae_ratio_t
     self.tokens_chunk_size = math.ceil(self.clip_length / self.vae_ratio_t)
     self.token_overlap = (-self.token_drop) % self.tokens_chunk_size
-    self.frame_overlap = max(self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0)
+    self.frame_overlap = max(
+        self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0
+    )
 
     self.tile_size = 256
     self.tile_overlap_min = 64
 
-    self.register_buffer("latents_mean", torch.tensor(LATENTS_MEAN).view(1, -1, 1, 1, 1), persistent=False,)
-    self.register_buffer("latents_std", torch.tensor(LATENTS_STD).view(1, -1, 1, 1, 1), persistent=False,)
-    self.register_buffer("pixel_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False,)
-    self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False,)
-
-  def load_runners_to_gpu(self):
-    if self.decoder_runner is not None:
-      self.decoder_runner.load_to_gpu()
-    if self.encoder_runner is not None:
-      self.encoder_runner.load_to_gpu()
+    self.register_buffer(
+        "latents_mean",
+        torch.tensor(LATENTS_MEAN).view(1, -1, 1, 1, 1),
+        persistent=False,
+    )
+    self.register_buffer(
+        "latents_std",
+        torch.tensor(LATENTS_STD).view(1, -1, 1, 1, 1),
+        persistent=False,
+    )
+    self.register_buffer(
+        "pixel_mean",
+        torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1, 1),
+        persistent=False,
+    )
+    self.register_buffer(
+        "pixel_std",
+        torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1),
+        persistent=False,
+    )
 
   def offload_runners_to_ram(self):
     if self.decoder_runner is not None:
       self.decoder_runner.offload_to_ram()
     if self.encoder_runner is not None:
       self.encoder_runner.offload_to_ram()
-
-  def get_total_engine_size(self):
-    total_size = 0
-    if self.decoder_runner and os.path.exists(self.decoder_runner.model_path):
-      total_size += os.path.getsize(self.decoder_runner.model_path)
-    if self.encoder_runner and os.path.exists(self.encoder_runner.model_path):
-      total_size += os.path.getsize(self.encoder_runner.model_path)
-    return max(total_size, 1024 * 1024 * 500)
+    self.model_loaded_weight_memory = 0
 
   def _decode_temporal_chunks(self, z_len):
     pseudo_total_tokens = z_len + self.token_drop
     pad_tokens = (-pseudo_total_tokens) % self.tokens_chunk_size
     pseudo_total_tokens += pad_tokens
-    num_chunks = pseudo_total_tokens // self.tokens_chunk_size - int(self.token_drop > 0)
+    num_chunks = pseudo_total_tokens // self.tokens_chunk_size - int(
+        self.token_drop > 0
+    )
     if num_chunks < 1:
       pad_tokens += self.tokens_chunk_size
       num_chunks += 1
     return pad_tokens, num_chunks
-
-  def decode_temporal(self, z):
-    chunk_dec = self.tokens_chunk_size * self.vae_ratio_t
-    split_count = int(self.token_drop > 0) + 1
-    
-    # 🌟 关键修复：使用官方原版方法计算，包含不足 1 块时的 pad 保护 (T_lat=2 -> 补齐到 7)
-    pad_tokens, num_chunks = self._decode_temporal_chunks(z.shape[2])
-    
-    if pad_tokens > 0:
-      z = torch.cat([z, z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)], dim=2)
-      
-    dec_chunks, dec_overlap = [], None
-    for i in range(num_chunks):
-      t_start = i * self.tokens_chunk_size
-      clip_z = z[
-          :, :,
-          t_start : t_start + self.tokens_chunk_size + self.token_overlap,
-          :, :,
-      ]
-      clip_dec = self.tiled_decode(clip_z)
-      
-      for j in range(split_count):
-        f_start = j * chunk_dec
-        f_end = min(f_start + chunk_dec, clip_dec.shape[2])
-        chunk = clip_dec[:, :, f_start:f_end, :, :]
-        chunk = chunk[:, :, self.frame_pre_padding :, :, :]
-        
-        if j == 0:
-          if dec_overlap is not None:
-            chunk = self.blend(dec_overlap, chunk, self.frame_overlap, dim=-3)
-            dec_overlap = None
-          dec_chunks.append(self._finalize_pixels(chunk))
-        else:
-          dec_overlap = chunk.contiguous()
-          
-      if i == num_chunks - 1 and dec_overlap is not None:
-        dec_chunks.append(self._finalize_pixels(dec_overlap))
-        
-    return torch.cat(dec_chunks, dim=2)
 
   def _adaptive_decode(self, z):
     return self.tiled_decode(z)
@@ -322,14 +301,23 @@ class MiniMaxH3TRTVAE(nn.Module):
       frames = 1
     else:
       pad_tokens, num_chunks = self._decode_temporal_chunks(t)
-      frames = self._decode_temporal_frame_plan(t + pad_tokens, num_chunks, pad_tokens)
-      frames = self._decode_temporal_frame_plan(t + pad_tokens, num_chunks, pad_tokens)
+      frames = self._decode_temporal_frame_plan(
+          t + pad_tokens, num_chunks, pad_tokens
+      )
     return (b, 3, frames, h * self.vae_ratio, w * self.vae_ratio)
 
   def _decode_pixels(self, z):
     b, _, t, h, w = z.shape
-    out_shape = (b, 3, t * self.vae_ratio_t, h * self.vae_ratio, w * self.vae_ratio,)
-    return self.decoder_runner.infer(z, output_shape=out_shape, input_name="latent_tile")
+    out_shape = (
+        b,
+        3,
+        t * self.vae_ratio_t,
+        h * self.vae_ratio,
+        w * self.vae_ratio,
+    )
+    return self.decoder_runner.infer(
+        z, output_shape=out_shape, input_name="latent_tile"
+    )
 
   def _encode_moments(self, x):
     b, c, t, h, w = x.shape
@@ -349,14 +337,18 @@ class MiniMaxH3TRTVAE(nn.Module):
         target_h // self.vae_ratio,
         target_w // self.vae_ratio,
     )
-    moments = self.encoder_runner.infer(x_in, output_shape=out_shape, input_name="pixel_tile")
+    moments = self.encoder_runner.infer(
+        x_in, output_shape=out_shape, input_name="pixel_tile"
+    )
 
     out_h = math.ceil(h / self.vae_ratio)
     out_w = math.ceil(w / self.vae_ratio)
     return moments[..., :out_h, :out_w]
 
   def _finalize_pixels(self, part):
-    return (part * self.pixel_std.to(part) + self.pixel_mean.to(part)).clamp(0.0, 1.0)
+    return (part * self.pixel_std.to(part) + self.pixel_mean.to(part)).clamp(
+        0.0, 1.0
+    )
 
   def _normalize_pixels(self, x):
     return (x - self.pixel_mean.to(x)) / self.pixel_std.to(x)
@@ -366,7 +358,10 @@ class MiniMaxH3TRTVAE(nn.Module):
     if blend_extent <= 0:
       return b
 
-    weight = (torch.arange(blend_extent, device=b.device, dtype=b.dtype) / blend_extent)
+    weight = (
+        torch.arange(blend_extent, device=b.device, dtype=b.dtype)
+        / blend_extent
+    )
     shape = [1] * a.ndim
     shape[dim] = blend_extent
     weight = weight.view(shape)
@@ -416,7 +411,9 @@ class MiniMaxH3TRTVAE(nn.Module):
 
         if i < len(y_idx) - 1:
           new_tails.append(tile[..., -y_overlap[i] :, :].clone())
-        next_left_tail = (tile[..., :, -x_overlap[j] :].clone() if j < len(x_idx) - 1 else None)
+        next_left_tail = (
+            tile[..., :, -x_overlap[j] :].clone() if j < len(x_idx) - 1 else None
+        )
 
         if i > 0:
           tile = self.blend(row_tails[j], tile, y_overlap[i - 1], dim=-2)
@@ -430,7 +427,13 @@ class MiniMaxH3TRTVAE(nn.Module):
           tile = tile[..., :, : -x_overlap[j]]
 
         if canvas is None:
-          canvas = torch.zeros(*tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device,)
+          canvas = torch.zeros(
+              *tile.shape[:-2],
+              height,
+              width,
+              dtype=tile.dtype,
+              device=tile.device,
+          )
         canvas[
             ...,
             out_y : out_y + tile.shape[-2],
@@ -462,7 +465,9 @@ class MiniMaxH3TRTVAE(nn.Module):
       result_row = []
       for j, tile in enumerate(row):
         if i > 0:
-          tile = self.blend(rows[i - 1][j], tile, latent_y_overlap[i - 1], dim=-2)
+          tile = self.blend(
+              rows[i - 1][j], tile, latent_y_overlap[i - 1], dim=-2
+          )
         if j > 0:
           tile = self.blend(row[j - 1], tile, latent_x_overlap[j - 1], dim=-1)
         if i < len(rows) - 1:
@@ -476,26 +481,24 @@ class MiniMaxH3TRTVAE(nn.Module):
   def decode_temporal(self, z):
     chunk_dec = self.tokens_chunk_size * self.vae_ratio_t
     split_count = int(self.token_drop > 0) + 1
-  
-    # 🌟 核心修复：直接调用 _decode_temporal_chunks，当 T_lat == 2 时会自动把 pad_tokens 设为 5，num_chunks 设为 1
+
     pad_tokens, num_chunks = self._decode_temporal_chunks(z.shape[2])
-  
     if pad_tokens > 0:
       z = torch.cat([z, z[:, :, -1:, :, :].repeat(1, 1, pad_tokens, 1, 1)], dim=2)
-      
+
     dec_chunks, dec_overlap = [], None
     for i in range(num_chunks):
       t_start = i * self.tokens_chunk_size
       t_end = t_start + self.tokens_chunk_size + self.token_overlap
       clip_z = z[:, :, t_start:t_end, :, :]
       clip_dec = self.tiled_decode(clip_z)
-      
+
       for j in range(split_count):
         f_start = j * chunk_dec
         f_end = min(f_start + chunk_dec, clip_dec.shape[2])
         chunk = clip_dec[:, :, f_start:f_end, :, :]
         chunk = chunk[:, :, self.frame_pre_padding :, :, :]
-        
+
         if j == 0:
           if dec_overlap is not None:
             chunk = self.blend(dec_overlap, chunk, self.frame_overlap, dim=-3)
@@ -503,10 +506,10 @@ class MiniMaxH3TRTVAE(nn.Module):
           dec_chunks.append(self._finalize_pixels(chunk))
         else:
           dec_overlap = chunk.contiguous()
-          
+
       if i == num_chunks - 1 and dec_overlap is not None:
         dec_chunks.append(self._finalize_pixels(dec_overlap))
-        
+
     return torch.cat(dec_chunks, dim=2)
 
   def encode_temporal(self, x):
@@ -515,7 +518,9 @@ class MiniMaxH3TRTVAE(nn.Module):
     for i in range(num_clips):
       clip_x = x[:, :, i * self.clip_length : (i + 1) * self.clip_length, :, :]
       if clip_x.shape[2] < self.clip_length:
-        pad_frames = clip_x[:, :, -1:].repeat(1, 1, self.clip_length - clip_x.shape[2], 1, 1)
+        pad_frames = clip_x[:, :, -1:].repeat(
+            1, 1, self.clip_length - clip_x.shape[2], 1, 1
+        )
         clip_x = torch.cat([clip_x, pad_frames], dim=2)
       z_list.append(self.tiled_encode(self._normalize_pixels(clip_x)))
 
@@ -526,56 +531,77 @@ class MiniMaxH3TRTVAE(nn.Module):
 
   def decode(self, z):
     if self.decoder_runner is None:
-      raise RuntimeError("Decoder model is not loaded!")
-    try:
-      z = z * self.latents_std.to(z) + self.latents_mean.to(z)
-      if z.shape[2] == 1:
-        # 🌟 如果是单张图片 (T=1)，填充到 7 个 token 以满足 TRT 静态切片尺寸
-        z_pad = z.repeat(1, 1, 7, 1, 1)
-        return self._finalize_pixels(
-            self.tiled_decode(z_pad)[:, :, -1:, :, :]
-        )
-      return self.decode_temporal(z)
-    finally:
-      pass
+      raise RuntimeError("Decoder engine is not configured in VAE Loader node!")
+    z = z * self.latents_std.to(z) + self.latents_mean.to(z)
+    if z.shape[2] == 1:
+      z_pad = z.repeat(1, 1, 7, 1, 1)
+      return self._finalize_pixels(self.tiled_decode(z_pad)[:, :, -1:, :, :])
+    return self.decode_temporal(z)
 
   def encode(self, x):
     if self.encoder_runner is None:
-      raise RuntimeError("Encoder model is not loaded!")
-    try:
-      if x.ndim == 4:
-        x = x.unsqueeze(2)
-      if x.shape[2] == 1:
-        moments = self.tiled_encode(self._normalize_pixels(x))[:, :, -1:, :, :]
-      else:
-        moments = self.encode_temporal(x)
+      raise RuntimeError("Encoder engine is not configured in VAE Loader node!")
+    if x.ndim == 4:
+      x = x.unsqueeze(2)
+    if x.shape[2] == 1:
+      moments = self.tiled_encode(self._normalize_pixels(x))[:, :, -1:, :, :]
+    else:
+      moments = self.encode_temporal(x)
 
-      mean = torch.chunk(moments, 2, dim=1)[0]
-      return (mean - self.latents_mean.to(mean)) / self.latents_std.to(mean)
-    finally:
-      pass
+    mean = torch.chunk(moments, 2, dim=1)[0]
+    return (mean - self.latents_mean.to(mean)) / self.latents_std.to(mean)
 
 
 # ================= 4. 原生 ModelPatcher 显存追踪器与 VAE 包装 =================
 
 
 class TRTModelPatcher(comfy.model_patcher.ModelPatcher):
-  
-  def __init__(self, model, load_device, offload_device=torch.device("cpu"), size=0, weight_inplace_update=False,):
+
+  def __init__(
+      self,
+      model,
+      load_device,
+      offload_device=torch.device("cpu"),
+      decoder_size=0,
+      encoder_size=0,
+      weight_inplace_update=False,
+  ):
     super().__init__(
         model,
         load_device=load_device,
         offload_device=offload_device,
-        size=size,
+        size=decoder_size or encoder_size,
         weight_inplace_update=weight_inplace_update,
     )
-    self._custom_model_size = size
-    
+    self.decoder_size = decoder_size
+    self.encoder_size = encoder_size
+    self.current_mode = "decode"
+
   def model_size(self):
-    if self._custom_model_size > 0:
-      return self._custom_model_size
-    return super().model_size()
-  
+    if self.current_mode == "encode":
+      return self.encoder_size
+    return self.decoder_size
+
+  def loaded_size(self):
+    """🌟 核心方法：Aimdo 通过调用 loaded_size() 统计当前显存占用，从而使 RAM 占用归零"""
+    if (
+        self.current_mode == "encode"
+        and self.model.encoder_runner
+        and self.model.encoder_runner.context is not None
+    ):
+      loaded = self.encoder_size
+    elif (
+        self.current_mode == "decode"
+        and self.model.decoder_runner
+        and self.model.decoder_runner.context is not None
+    ):
+      loaded = self.decoder_size
+    else:
+      loaded = 0
+
+    self.model.model_loaded_weight_memory = loaded
+    return loaded
+
   def patch_model(
       self,
       device_to=None,
@@ -583,15 +609,13 @@ class TRTModelPatcher(comfy.model_patcher.ModelPatcher):
       load_weights=True,
       force_patch_weights=False,
   ):
-    if hasattr(self.model, "load_runners_to_gpu"):
-      self.model.load_runners_to_gpu()
     return super().patch_model(
         device_to=device_to,
         lowvram_model_memory=lowvram_model_memory,
         load_weights=False,
         force_patch_weights=False,
     )
-  
+
   def unpatch_model(self, device_to=None, unpatch_weights=True):
     if hasattr(self.model, "offload_runners_to_ram"):
       self.model.offload_runners_to_ram()
@@ -599,44 +623,66 @@ class TRTModelPatcher(comfy.model_patcher.ModelPatcher):
 
 
 class ComfyTRTVAE(comfy.sd.VAE):
-  
+
   def __init__(self, accelerated_vae: MiniMaxH3TRTVAE):
     self.first_stage_model = accelerated_vae
     self.vae_dtype = torch.float16
-    self.device = (mm.get_torch_device() if hasattr(mm, "get_torch_device") else torch.device("cuda"))
-    self.offload_device = (mm.unet_offload_device() if hasattr(mm, "unet_offload_device") else torch.device("cpu"))
-    
+    self.device = (
+        mm.get_torch_device()
+        if hasattr(mm, "get_torch_device")
+        else torch.device("cuda")
+    )
+    self.offload_device = (
+        mm.unet_offload_device()
+        if hasattr(mm, "unet_offload_device")
+        else torch.device("cpu")
+    )
+
     dec_size = 0
-    if accelerated_vae.decoder_runner and os.path.exists(accelerated_vae.decoder_runner.model_path):
+    if accelerated_vae.decoder_runner and os.path.exists(
+        accelerated_vae.decoder_runner.model_path
+    ):
       dec_size = os.path.getsize(accelerated_vae.decoder_runner.model_path)
-    
+
     enc_size = 0
-    if accelerated_vae.encoder_runner and os.path.exists(accelerated_vae.encoder_runner.model_path):
+    if accelerated_vae.encoder_runner and os.path.exists(
+        accelerated_vae.encoder_runner.model_path
+    ):
       enc_size = os.path.getsize(accelerated_vae.encoder_runner.model_path)
-    
-    self.dec_size = max(dec_size, 1024 * 1024 * 1024 * 2)
-    self.enc_size = max(enc_size, 1024 * 1024 * 300)
-    
+
+    self.dec_size = dec_size or 1024 * 1024 * 1024 * 2
+    self.enc_size = enc_size or 1024 * 1024 * 300
+
     self.patcher = TRTModelPatcher(
         self.first_stage_model,
         load_device=self.device,
         offload_device=self.offload_device,
-        size=self.dec_size,
+        decoder_size=self.dec_size,
+        encoder_size=self.enc_size,
     )
     self.memory_used_decode = lambda shape, dtype: self.dec_size
     self.memory_used_encode = lambda shape, dtype: self.enc_size
-    
+
   def decode(self, samples_in):
     z = samples_in["samples"] if isinstance(samples_in, dict) else samples_in
     if z.ndim == 4:
       z = z.unsqueeze(2)
-      
-    # 🌟 完全由 ComfyUI 进行显存登记与按需调度（KSampler 需要显存时 ComfyUI 会自动释放它）
+
+    # 1. 物理互斥：卸载编码器，加载解码器
+    if self.first_stage_model.encoder_runner is not None:
+      self.first_stage_model.encoder_runner.offload_to_ram()
+    self.first_stage_model.decoder_runner.load_to_gpu()
+
+    # 2. 同步状态给 ComfyUI / Aimdo 账本
+    self.patcher.current_mode = "decode"
+    self.patcher.size = self.dec_size
+    self.first_stage_model.model_loaded_weight_memory = self.dec_size
     mm.load_models_gpu([self.patcher], memory_required=self.dec_size)
+
     video = self.first_stage_model.decode(z.half().to(self.device))
     b, c, t, h, w = video.shape
     return video.permute(0, 2, 3, 4, 1).reshape(b * t, h, w, c).float().cpu()
-  
+
   def encode(self, pixel_in):
     if pixel_in.ndim == 4:
       x = pixel_in.permute(3, 0, 1, 2).unsqueeze(0)
@@ -644,8 +690,18 @@ class ComfyTRTVAE(comfy.sd.VAE):
       x = pixel_in.permute(0, 4, 1, 2, 3)
     else:
       raise ValueError(f"Unsupported pixel tensor shape: {pixel_in.shape}")
-      
+
+    # 1. 物理互斥：卸载解码器，加载编码器
+    if self.first_stage_model.decoder_runner is not None:
+      self.first_stage_model.decoder_runner.offload_to_ram()
+    self.first_stage_model.encoder_runner.load_to_gpu()
+
+    # 2. 同步状态给 ComfyUI / Aimdo 账本
+    self.patcher.current_mode = "encode"
+    self.patcher.size = self.enc_size
+    self.first_stage_model.model_loaded_weight_memory = self.enc_size
     mm.load_models_gpu([self.patcher], memory_required=self.enc_size)
+
     latents = self.first_stage_model.encode(x.half().to(self.device))
     return latents.float().cpu()
 
@@ -672,14 +728,13 @@ class MiniMaxH3TRTVAELoader:
                 options,
                 {
                     "default": "None",
-                    "tooltip": 'Please compile the TensorRT engine using the "MiniMax-H3 TRT VAE Compiler" node before first use.',
+                    "tooltip": "Select Decoder TRT Engine (can be 'None' if only encoding).",
                 },
             ),
             "encoder": (
-                options,
-                {
+                options, {
                     "default": "None",
-                    "tooltip": 'Please compile the TensorRT engine using the "MiniMax-H3 TRT VAE Compiler" node before first use.',
+                    "tooltip": "Select Encoder TRT Engine (can be 'None' if only decoding).",
                 },
             ),
         }
@@ -689,16 +744,22 @@ class MiniMaxH3TRTVAELoader:
   RETURN_NAMES = ("VAE",)
   FUNCTION = "load_vae"
   CATEGORY = "MiniMax_H3/Acceleration"
-  DESCRIPTION = 'Please compile the TensorRT engine using the "MiniMax-H3 TRT VAE Compiler" node before first use.'
+  DESCRIPTION = 'Please compile TensorRT engines using "MiniMax-H3 TRT VAE Compiler" node before first use.'
 
   def load_vae(self, decoder, encoder):
-    if encoder == "None":
-      raise RuntimeError("Encoder cannot be None!")
-    if decoder == "None":
-      raise RuntimeError("Decoder cannot be None!")
+    if decoder == "None" and encoder == "None":
+      raise RuntimeError("At least one of Decoder or Encoder must be selected in TRT VAE Loader!")
 
-    dec_path = folder_paths.get_full_path("vae", decoder)
-    enc_path = folder_paths.get_full_path("vae", encoder)
+    dec_path = (
+        folder_paths.get_full_path("vae", decoder)
+        if decoder != "None"
+        else None
+    )
+    enc_path = (
+        folder_paths.get_full_path("vae", encoder)
+        if encoder != "None"
+        else None
+    )
 
     dec_runner = AutoEngineRunner(dec_path) if dec_path else None
     enc_runner = AutoEngineRunner(enc_path) if enc_path else None
@@ -724,10 +785,10 @@ class MiniMaxH3TRTCompilerNode:
         "required": {
             "decoder_onnx": (options,),
             "encoder_onnx": (options,),
-            "delete_onnx_after_compile": ("BOOLEAN",
-                {
+            "delete_onnx_after_compile": (
+                "BOOLEAN", {
                     "default": False,
-                    "tooltip": "Delete ONNX and .onnx.data files from disk after  compilation.",
+                    "tooltip": "Delete ONNX and .onnx.data files from disk after compilation.",
                 },
             ),
         },
@@ -742,31 +803,62 @@ class MiniMaxH3TRTCompilerNode:
   CATEGORY = "MiniMax_H3/Acceleration"
 
   @classmethod
+  def _is_onnx_quantized(cls, onnx_path: str) -> bool:
+    filename_lower = os.path.basename(onnx_path).lower()
+    quant_keywords = ["w4a", "w8a", "int4", "int8", "fp4", "fp8", "awq", "quant"]
+    if any(kw in filename_lower for kw in quant_keywords):
+      return True
+
+    try:
+      model = onnx.load(onnx_path, load_external_data=False)
+      for init in model.graph.initializer:
+        if init.data_type in (21, 22, 3):
+          return True
+        
+      for node in model.graph.node:
+        if node.op_type in ("DequantizeLinear", "QuantizeLinear"):
+          return True
+    except Exception as e:
+      logger.warning(f"Failed to inspect ONNX graph directly ({e}), falling back to filename detection.")
+      
+    return False
+
+  @classmethod
   def _build_engine(cls, onnx_path, engine_path, is_decoder=True):
     if not HAS_TRT:
-      raise RuntimeError("TensorRT library not found! Please install with pip first.")
+      raise RuntimeError("TensorRT library not found!")
 
-    logger.info(f"Initializing TensorRT Builder for: {os.path.basename(onnx_path)}")
+    logger.info(f"Analyzing ONNX Model: {os.path.basename(onnx_path)}")
+    is_quantized = cls._is_onnx_quantized(onnx_path)
+
     trt_logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(trt_logger)
     config = builder.create_builder_config()
 
-    if hasattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH"):
-      flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-      network = builder.create_network(flags)
+    if is_quantized:
+      logger.info("-> Detected: Quantized Model. Enabling Strongly-Typed  Mode...")
+      if hasattr(trt.NetworkDefinitionCreationFlag, "STRONGLY_TYPED"):
+        flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+        network = builder.create_network(flags)
+      else:
+        network = builder.create_network()
     else:
-      network = builder.create_network()
+      logger.info("-> Detected: Unquantized Model. Enabling FP16 Tensor Cores...")
+      if hasattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH"):
+        flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        network = builder.create_network(flags)
+      else:
+        network = builder.create_network()
+
+      if hasattr(trt.BuilderFlag, "FP16"):
+        config.set_flag(trt.BuilderFlag.FP16)
 
     parser = trt.OnnxParser(network, trt_logger)
-
     if not parser.parse_from_file(onnx_path):
       error_msgs = []
       for error in range(parser.num_errors):
         error_msgs.append(str(parser.get_error(error)))
       raise RuntimeError("Failed to parse ONNX:\n" + "\n".join(error_msgs))
-
-    if hasattr(trt.BuilderFlag, "FP16"):
-      config.set_flag(trt.BuilderFlag.FP16)
 
     workspace_size = (4 if is_decoder else 8) * (1024**3)
     if hasattr(config, "set_memory_pool_limit"):
@@ -785,6 +877,7 @@ class MiniMaxH3TRTCompilerNode:
     profile.set_shape(input_name, shape, shape, shape)
     config.add_optimization_profile(profile)
 
+    logger.info("Building TensorRT Engine...")
     if hasattr(builder, "build_serialized_network"):
       serialized_engine = builder.build_serialized_network(network, config)
       if serialized_engine is None:
@@ -798,7 +891,9 @@ class MiniMaxH3TRTCompilerNode:
       with open(engine_path, "wb") as f:
         f.write(engine.serialize())
 
-  def compile_models(self, decoder_onnx, encoder_onnx, delete_onnx_after_compile, unique_id):
+  def compile_models(
+      self, decoder_onnx, encoder_onnx, delete_onnx_after_compile, unique_id
+  ):
     dec_path = folder_paths.get_full_path("vae", decoder_onnx)
     enc_path = folder_paths.get_full_path("vae", encoder_onnx)
 
@@ -834,5 +929,7 @@ class MiniMaxH3TRTCompilerNode:
           os.remove(data_path)
 
     logger.info('All Done! Please press "R" to refresh the model list.')
-    PromptServer.instance.send_progress_text('Done! Press "R" to refresh the model list.', unique_id)
+    PromptServer.instance.send_progress_text(
+        'Done! Press "R" to refresh the model list', unique_id
+    )
     return ()
